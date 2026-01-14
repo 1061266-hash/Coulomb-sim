@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Coulomb’s Law Simulation (SPH4U)</title>
+
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h2 { margin-top: 0; }
+
+    .row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+    canvas { border: 1px solid #aaa; background: #fff; }
+
+    .panel { width: 360px; }
+
+    .box {
+      border: 1px solid #ddd;
+      padding: 12px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+      background: #fff;
+    }
+
+    label { display: block; margin-top: 10px; }
+    input[type="range"] { width: 100%; }
+    .mono { font-family: ui-monospace, Consolas, monospace; }
+
+    button{
+      padding: 8px 12px;
+      border: 1px solid #bbb;
+      border-radius: 10px;
+      background: #fff;
+      cursor: pointer;
+    }
+    button:hover { background: #f5f5f5; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border: 1px solid #e5e5e5; padding: 8px; }
+    thead tr { background: #fafafa; }
+
+    .note { margin-top: 10px; line-height: 1.35; }
+    .muted { color: #444; font-size: 13px; }
+  </style>
+</head>
+
+<body>
+<h2>Coulomb’s Law Simulation (SPH4U)</h2>
+
+<div class="row">
+  <canvas id="sim" width="700" height="420"></canvas>
+
+  <div class="panel">
+    <!-- Controls -->
+    <div class="box">
+      <h3>Controls</h3>
+
+      <label>q1 (µC): <span id="q1Val" class="mono"></span></label>
+      <input id="q1" type="range" min="-6" max="6" step="0.1" value="2">
+
+      <label>q2 (µC): <span id="q2Val" class="mono"></span></label>
+      <input id="q2" type="range" min="-6" max="6" step="0.1" value="3">
+
+      <label>Scale (meters per pixel): <span id="scaleVal" class="mono"></span></label>
+      <input id="scale" type="range" min="0.0005" max="0.005" step="0.0001" value="0.001">
+
+      <div class="muted" style="margin-top:6px;">
+        0.001 m/px means 100 px = 0.10 m
+      </div>
+    </div>
+
+    <!-- Readouts -->
+    <div class="box">
+      <h3>Readouts</h3>
+      <div>r (m): <span id="rOut" class="mono"></span></div>
+      <div>F (N): <span id="fOut" class="mono"></span></div>
+      <div>Interaction: <span id="modeOut" class="mono"></span></div>
+      <div>k_calc: <span id="kOut" class="mono"></span></div>
+      <hr/>
+      <div class="muted">
+        <b>Constant used:</b> <span class="mono">k = 8,990,000,000 N·m²/C²</span>
+      </div>
+    </div>
+
+    <!-- Data Table -->
+    <div class="box">
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+        <button id="recordBtn">Record Trial</button>
+        <button id="clearBtn">Clear Table</button>
+        <button id="resetBtn">Reset Charges</button>
+      </div>
+
+      <h3 style="margin: 6px 0 10px;">Data Table</h3>
+
+      <div style="border:1px solid #e5e5e5; border-radius:12px; overflow:hidden;">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>r (m)</th>
+              <th>F (N)</th>
+              <th>1/r^2 (m^-2)</th>
+              <th>k_calc (N·m^2/C^2)</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <div><b>Accepted:</b> k ≈ 8.99 × 10^9 N·m^2/C^2.</div>
+        <div id="summaryText" class="muted" style="margin-top:6px;">
+          Use the table to average your k values and calculate percent error.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===============================
+   1) SETUP
+================================ */
+const canvas = document.getElementById("sim");
+const ctx = canvas.getContext("2d");
+
+// Coulomb constant
+const K = 8990000000;
+const K_ACCEPTED = 8990000000;
+
+// Minimum distance to avoid huge forces
+const MIN_R = 0.05;
+
+// Charges (pixel positions)
+const charge1 = { x: 200, y: 210, radius: 22, color: "#d62828" };
+const charge2 = { x: 500, y: 210, radius: 22, color: "#003049" };
+
+// Dragging
+let dragging = null;
+
+/* ===============================
+   2) UI ELEMENTS
+================================ */
+const q1Slider = document.getElementById("q1");
+const q2Slider = document.getElementById("q2");
+const scaleSlider = document.getElementById("scale");
+
+const q1Val = document.getElementById("q1Val");
+const q2Val = document.getElementById("q2Val");
+const scaleVal = document.getElementById("scaleVal");
+
+const rOut = document.getElementById("rOut");
+const fOut = document.getElementById("fOut");
+const modeOut = document.getElementById("modeOut");
+const kOut = document.getElementById("kOut");
+
+// Table + buttons
+const recordBtn = document.getElementById("recordBtn");
+const clearBtn = document.getElementById("clearBtn");
+const resetBtn = document.getElementById("resetBtn");
+const tableBody = document.getElementById("tableBody");
+const summaryText = document.getElementById("summaryText");
+
+// Store trials
+let trials = [];
+
+/* ===============================
+   3) HELPERS
+================================ */
+function distPx(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function fmt(n, digits=3) {
+  return Number(n).toFixed(digits);
+}
+
+function fmtSci(n, sig=3) {
+  if (n === 0) return "0";
+  const exp = Math.floor(Math.log10(Math.abs(n)));
+  const mant = n / Math.pow(10, exp);
+  return mant.toFixed(sig-1) + " × 10^" + exp;
+}
+
+/* ===============================
+   4) PHYSICS
+================================ */
+function compute() {
+  const q1_uC = Number(q1Slider.value);
+  const q2_uC = Number(q2Slider.value);
+  const scale = Number(scaleSlider.value); // meters per pixel
+
+  // Convert µC to C
+  const q1 = q1_uC * 0.000001;
+  const q2 = q2_uC * 0.000001;
+
+  // Distance in meters
+  const dpx = distPx(charge1, charge2);
+  let r = dpx * scale;
+  if (r < MIN_R) r = MIN_R;
+
+  // Magnitude of product (no abs())
+  const prod = q1*q2;
+  const magProd = Math.sqrt(prod*prod);
+
+  // Force magnitude
+  const F = (magProd === 0) ? 0 : (K * magProd) / (r*r);
+
+  // Mode
+  const mode = (q1_uC * q2_uC < 0) ? "Attract" : "Repel";
+
+  // k calculated
+  const k_calc = (magProd === 0) ? 0 : (F * r * r) / magProd;
+
+  return { q1_uC, q2_uC, scale, r, F, mode, k_calc };
+}
+
+/* ===============================
+   5) DRAWING
+================================ */
+function draw() {
+  const s = compute();
+
+  // Update UI
+  q1Val.textContent = s.q1_uC.toFixed(1);
+  q2Val.textContent = s.q2_uC.toFixed(1);
+  scaleVal.textContent = s.scale.toFixed(4);
+
+  rOut.textContent = fmt(s.r, 3);
+  fOut.textContent = fmtSci(s.F, 3);
+  modeOut.textContent = s.mode;
+  kOut.textContent = fmtSci(s.k_calc, 3);
+
+  // Clear canvas
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Line between charges
+  ctx.beginPath();
+  ctx.moveTo(charge1.x, charge1.y);
+  ctx.lineTo(charge2.x, charge2.y);
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Distance label
+  ctx.fillStyle = "#111";
+  ctx.font = "14px Arial";
+  const midX = (charge1.x + charge2.x) / 2;
+  const midY = (charge1.y + charge2.y) / 2;
+  ctx.fillText(`r = ${fmt(s.r,3)} m`, midX + 8, midY - 8);
+
+  // Charges
+  drawCharge(charge1, s.q1_uC, "q1");
+  drawCharge(charge2, s.q2_uC, "q2");
+
+  // Force arrows
+  drawForceArrows(s.mode);
+}
+
+function drawCharge(c, q_uC, label) {
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, c.radius, 0, Math.PI*2);
+  ctx.fillStyle = c.color;
+  ctx.fill();
+
+  const sign = (q_uC >= 0) ? "+" : "−";
+  ctx.fillStyle = "#fff";
+  ctx.font = "22px Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(sign, c.x, c.y - 2);
+
+  ctx.font = "12px Arial";
+  ctx.fillText(label, c.x, c.y + 18);
+
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawArrow(x1,y1,x2,y2,color="#222") {
+  const headLen = 10;
+  const dx = x2-x1, dy = y2-y1;
+  const ang = Math.atan2(dy, dx);
+
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  ctx.lineTo(x2,y2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - headLen*Math.cos(ang - Math.PI/6), y2 - headLen*Math.sin(ang - Math.PI/6));
+  ctx.lineTo(x2 - headLen*Math.cos(ang + Math.PI/6), y2 - headLen*Math.sin(ang + Math.PI/6));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawForceArrows(mode) {
+  const L = 55;
+
+  const dx = charge2.x - charge1.x;
+  const dy = charge2.y - charge1.y;
+  const len = Math.sqrt(dx*dx + dy*dy) || 1;
+  const ux = dx/len, uy = dy/len;
+
+  if (mode === "Repel") {
+    drawArrow(charge1.x, charge1.y, charge1.x - L*ux, charge1.y - L*uy);
+    drawArrow(charge2.x, charge2.y, charge2.x + L*ux, charge2.y + L*uy);
+  } else {
+    drawArrow(charge1.x, charge1.y, charge1.x + L*ux, charge1.y + L*uy);
+    drawArrow(charge2.x, charge2.y, charge2.x - L*ux, charge2.y - L*uy);
+  }
+}
+
+/* ===============================
+   6) TABLE LOGIC
+================================ */
+function renderTable() {
+  tableBody.innerHTML = "";
+
+  for (let i = 0; i < trials.length; i++) {
+    const t = trials[i];
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${t.r.toFixed(3)}</td>
+      <td>${t.F.toFixed(3)}</td>
+      <td>${t.invR2.toFixed(2)}</td>
+      <td>${fmtSci(t.kcalc, 3)}</td>
+    `;
+    tableBody.appendChild(tr);
+  }
+
+  updateSummary();
+}
+
+function updateSummary() {
+  if (trials.length === 0) {
+    summaryText.textContent = "Use the table to average your k values and calculate percent error.";
+    return;
+  }
+
+  let sum = 0;
+  for (const t of trials) sum += t.kcalc;
+  const kAvg = sum / trials.length;
+
+  const percentError = Math.abs((kAvg - K_ACCEPTED) / K_ACCEPTED) * 100;
+
+  summaryText.innerHTML =
+    `Average k ≈ <b>${fmtSci(kAvg, 3)}</b> N·m²/C²<br>` +
+    `Percent error ≈ <b>${percentError.toFixed(2)}%</b>`;
+}
+
+/* ===============================
+   7) BUTTONS
+================================ */
+recordBtn.addEventListener("click", () => {
+  const s = compute();
+  const invR2 = 1 / (s.r * s.r);
+
+  trials.push({
+    r: s.r,
+    F: s.F,
+    invR2: invR2,
+    kcalc: s.k_calc
+  });
+
+  renderTable();
+});
+
+clearBtn.addEventListener("click", () => {
+  trials = [];
+  renderTable();
+});
+
+resetBtn.addEventListener("click", () => {
+  charge1.x = 200; charge1.y = 210;
+  charge2.x = 500; charge2.y = 210;
+  draw();
+});
+
+/* ===============================
+   8) MOUSE DRAGGING
+================================ */
+function hitTest(c, mx, my) {
+  const dx = mx - c.x;
+  const dy = my - c.y;
+  return Math.sqrt(dx*dx + dy*dy) <= c.radius;
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  if (hitTest(charge1, mx, my)) dragging = "q1";
+  else if (hitTest(charge2, mx, my)) dragging = "q2";
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const x = clamp(mx, 20, canvas.width - 20);
+  const y = clamp(my, 20, canvas.height - 20);
+
+  if (dragging === "q1") { charge1.x = x; charge1.y = y; }
+  if (dragging === "q2") { charge2.x = x; charge2.y = y; }
+
+  draw();
+});
+
+window.addEventListener("mouseup", () => {
+  dragging = null;
+});
+
+/* ===============================
+   9) SLIDER EVENTS
+================================ */
+[q1Slider, q2Slider, scaleSlider].forEach(el => {
+  el.addEventListener("input", draw);
+});
+
+// First draw
+draw();
+</script>
+</body>
+</html>
+
